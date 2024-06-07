@@ -11,6 +11,10 @@ flask = "^3.0.1"
 openai = "^1.10.0"
 packaging = "^23.2"
 flask-cors = "^4.0.1"
+google-api-python-client = "^2.132.0"
+gspread = "^6.1.2"
+flask-limiter = "^3.7.0"
+google-auth = "^2.30.0"
 
 [tool.pyright]
 # https://github.com/microsoft/pyright/blob/main/docs/configuration.md

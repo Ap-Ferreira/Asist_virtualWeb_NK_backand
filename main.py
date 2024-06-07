@@ -1,9 +1,14 @@
 import logging
 from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
-from core_functions import add_thread, client, process_tool_calls, get_assistant_id, check_openai_version, add_thread_to_sheet, load_tools_from_directory, get_or_create_folder, open_spreadsheet_in_folder, list_spreadsheets_in_folder, debug_list_files_in_folder
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import os
+from core_functions import (
+    add_thread, client, process_tool_calls, get_assistant_id, check_openai_version, 
+    add_thread_to_sheet, load_tools_from_directory, open_spreadsheet_in_folder, 
+    list_spreadsheets_in_folder
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,25 +34,23 @@ limiter = Limiter(key_func=get_remote_address,
                   app=app,
                   default_limits=["200 per minute"])
 
-# Obtener o crear la carpeta 'bot_sheets'
-folder_id = get_or_create_folder('bot_sheets')
+# Get Google Drive folder ID and spreadsheet name from environment variables
+drive_folder_id = os.getenv('DRIVE_FOLDER_ID')
+sheet_name = os.getenv('SHEET_NAME')
 
-# Listar las hojas de cálculo en la carpeta 'bot_sheets'
-list_spreadsheets_in_folder(folder_id)
+# List spreadsheets in the specified folder
+list_spreadsheets_in_folder(drive_folder_id)
 
-# Debug: Listar todos los archivos en la carpeta 'bot_sheets'
-debug_list_files_in_folder(folder_id)
-
-# Abrir la hoja de cálculo 'junio' en la carpeta 'bot_sheets'
+# Open the specified spreadsheet in the specified folder
 try:
-    spreadsheet = open_spreadsheet_in_folder(folder_id, "junio")
+    spreadsheet = open_spreadsheet_in_folder(drive_folder_id, sheet_name)
     sheet = spreadsheet.sheet1
 except FileNotFoundError as e:
     logging.error(e)
-    sheet = None  # Definir `sheet` como None si no se encuentra la hoja de cálculo
+    sheet = None  # Define `sheet` as None if the spreadsheet is not found
 
 @app.route('/start', methods=['GET'])
-@limiter.limit("50 per day")  # Limitar a 50 conversaciones por día
+@limiter.limit("50 per day")  # Limit to 50 conversations per day
 def start_conversation():
     platform = request.args.get('platform', 'Not Specified')
     logging.info(f"Starting a new conversation from platform: {platform}")
@@ -60,11 +63,10 @@ def start_conversation():
         logging.error("Sheet not defined. Cannot add thread to sheet.")
         return jsonify({"error": "Sheet not defined"}), 500
 
-    # add_thread(thread.id, platform)
     return jsonify({"thread_id": thread.id})
 
 @app.route('/chat', methods=['POST'])
-@limiter.limit("100 per day")  # Limitar a 100 mensajes por día
+@limiter.limit("100 per day")  # Limit to 100 messages per day
 def chat():
     data = request.json
     thread_id = data.get('thread_id')
@@ -75,14 +77,10 @@ def chat():
         return jsonify({"error": "Missing thread_id"}), 400
 
     logging.info(f"Received message: {user_input} for thread ID: {thread_id}")
-    client.beta.threads.messages.create(thread_id=thread_id,
-                                        role="user",
-                                        content=user_input)
-    run = client.beta.threads.runs.create(thread_id=thread_id,
-                                          assistant_id=assistant_id)
+    client.beta.threads.messages.create(thread_id=thread_id, role="user", content=user_input)
+    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=assistant_id)
 
     logging.info(f"Run ID: {run.id}")
-    # This processes any possible action requests
     result = process_tool_calls(client, thread_id, run.id, tool_data)
     return jsonify(result)
 
@@ -99,8 +97,7 @@ def handle_401_error(e):
 @app.errorhandler(500)
 def handle_500_error(e):
     logging.error(f"Internal Server Error: {e}")
-    return jsonify(error="Internal Server Error",
-                   message="An unexpected error occurred"), 500
+    return jsonify(error="Internal Server Error", message="An unexpected error occurred"), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
