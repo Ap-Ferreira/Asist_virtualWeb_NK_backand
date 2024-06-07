@@ -1,0 +1,16 @@
+Escribe una definición en el formato a continuación que describa una acción (herramienta) para un chatbot. La definición que crees se utilizará para generar dinámicamente código en Python, así que asegúrate de agregar restricciones y la característica que la herramienta debe soportar, incluyendo los campos requeridos. Asegúrate de que la característica esté optimizada para ser descriptiva para que tu LLM la interprete perfectamente para la API de asistentes de OpenAI.
+
+REEMPLAZA ESTO BASADO EN LOS REQUISITOS DE TU HERRAMIENTA
+La acción debería poder inscribir a un usuario en un boletín informativo (utilizando Campaign Monitor)
+
+# El ejemplo (Proporciona la respuesta en el mismo formato):
+
+**Funcionalidad**
+La nueva herramienta envía un correo electrónico con el nombre, correo electrónico y contenido.
+
+**Descripción de la Característica**
+Una descripción de la característica.
+
+**Restricciones**
+- Utilizar make.com para enviar el correo electrónico mediante una URL de webhook
+- Todos los campos de la herramienta son obligatorios
