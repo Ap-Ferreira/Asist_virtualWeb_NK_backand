@@ -1,31 +1,33 @@
 import importlib.util
-from flask import request, abort, jsonify
 import logging
 import openai
 import os
-from packaging import version
 import requests
-import time
 import json
 import re
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+from googleapiclient.discovery import build
+from flask import request, abort, jsonify
+from packaging import version
 
-# Cargar las variables de entorno desde Replit Environment
+# Cargar las variables de entorno desde el entorno
 AIRTABLE_DB_URL = os.getenv('AIRTABLE_DB_URL')
 AIRTABLE_API_KEY = f"Bearer {os.getenv('AIRTABLE_API_KEY')}"
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ASSISTANT_ID = os.getenv('ASSISTANT_ID')
 CUSTOM_API_KEY = os.getenv('CUSTOM_API_KEY')
 GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv('SHEETS_CREDENTIALS')
+GOOGLE_DRIVE_FOLDER_PATH = os.getenv('DRIVE_FOLDER_PATH')
+SHEET_NAME = os.getenv('SHEET_NAME')
 
 # Initialize OpenAI client with v2 API header
 if not OPENAI_API_KEY:
     raise ValueError("No OpenAI API key found in environment variables")
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# Configuración de las credenciales y alcance de Google Sheets
+# Configuración de las credenciales y alcance de Google Sheets y Drive
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -33,24 +35,83 @@ scope = [
 creds = Credentials.from_service_account_file(GOOGLE_SHEETS_CREDENTIALS_PATH,
                                               scopes=scope)
 sheets_client = gspread.authorize(creds)
+drive_service = build('drive', 'v3', credentials=creds)
 
-# Listar todas las hojas de cálculo disponibles
-try:
-    spreadsheets = sheets_client.openall()
-    print("Hojas de cálculo disponibles:")
-    for spreadsheet in spreadsheets:
-        print(spreadsheet.title)
-except Exception as e:
-    print(f"An error occurred while listing spreadsheets: {e}")
 
-# Abrir la hoja de cálculo y seleccionar la hoja
-try:
-    spreadsheet = sheets_client.open("sheets-api")
-    sheet = spreadsheet.sheet1  # Puedes usar .get_worksheet(index) si tienes múltiples hojas
-except gspread.exceptions.SpreadsheetNotFound:
-    print(
-        "Spreadsheet not found. Please check the name and ensure it has been shared with the service account."
-    )
+def get_or_create_folder(folder_name):
+    query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive').execute()
+    items = results.get('files', [])
+
+    if not items:
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder'
+        }
+        folder = drive_service.files().create(body=file_metadata,
+                                              fields='id').execute()
+        folder_id = folder.get('id')
+        logging.info(f"Folder '{folder_name}' created with ID: {folder_id}")
+    else:
+        folder_id = items[0]['id']
+        logging.info(
+            f"Folder '{folder_name}' already exists with ID: {folder_id}")
+
+    return folder_id
+
+
+def list_spreadsheets_in_folder(folder_id):
+    query = f"'{folder_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive').execute()
+    items = results.get('files', [])
+
+    if not items:
+        logging.info('No spreadsheets found in folder.')
+    else:
+        logging.info('Spreadsheets found in folder:')
+        for item in items:
+            logging.info(f"{item['name']} (ID: {item['id']})")
+
+
+def debug_list_files_in_folder(folder_id):
+    query = f"'{folder_id}' in parents and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive').execute()
+    items = results.get('files', [])
+
+    if not items:
+        logging.info('No files found in folder.')
+    else:
+        logging.info('Files found in folder:')
+        for item in items:
+            logging.info(
+                f"Name: {item['name']}, MIME type: {item['mimeType']}, ID: {item['id']}"
+            )
+
+
+def open_spreadsheet_in_folder(folder_id, spreadsheet_name):
+    query = f"'{folder_id}' in parents and name='{spreadsheet_name}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive').execute()
+    items = results.get('files', [])
+
+    if not items:
+        raise FileNotFoundError(
+            f"Spreadsheet '{spreadsheet_name}' not found in folder '{folder_id}'"
+        )
+
+    spreadsheet_id = items[0]['id']
+    return sheets_client.open_by_key(spreadsheet_id)
+
+
+def add_thread_to_sheet(thread_id, platform, sheet):
+    try:
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        sheet.append_row([thread_id, platform, '', current_time])
+        num_rows = len(sheet.get_all_values())
+        sheet.update_cell(num_rows, 5, "Arrived")
+        logging.info("Thread added to sheet successfully and 'Arrived' set.")
+    except Exception as e:
+        logging.error(f"An error occurred while adding the thread to the sheet: {e}")
+
 
 
 def check_openai_version():
@@ -64,7 +125,6 @@ def check_openai_version():
         logging.info("OpenAI version is compatible.")
 
 
-# Function to check API key
 def check_api_key():
     api_key = request.headers.get('X-API-KEY')
     if api_key != CUSTOM_API_KEY:
@@ -72,28 +132,6 @@ def check_api_key():
         abort(401)
 
 
-# Tu función existente para añadir datos a la hoja
-def add_thread_to_sheet(thread_id, platform):
-    try:
-        # Obtener la hora actual en formato deseado (por ejemplo, YYYY-MM-DD HH:MM:SS)
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        # Añadir una nueva fila al final de la hoja con la hora actual
-        sheet.append_row([thread_id, platform, current_time])
-
-        # Obtener el número de filas actual para saber dónde poner "Arrived"
-        num_rows = len(sheet.get_all_values())
-        sheet.update_cell(
-            num_rows, 5, "Arrived"
-        )  # Cambia el 5 por el número de la columna donde deseas poner "Arrived"
-
-        logging.info("Thread added to sheet successfully and 'Arrived' set.")
-    except Exception as e:
-        logging.error(
-            f"An error occurred while adding the thread to the sheet: {e}")
-
-
-# Add thread to DB with platform identifier
 def add_thread(thread_id, platform):
     url = f"{AIRTABLE_DB_URL}"
     headers = {
@@ -121,7 +159,6 @@ def add_thread(thread_id, platform):
         logging.error(f"An error occurred while adding the thread: {e}")
 
 
-# Process the actions that are initiated by the assistants API
 def process_tool_calls(client, thread_id, run_id, tool_data):
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id,
@@ -147,9 +184,8 @@ def process_tool_calls(client, thread_id, run_id, tool_data):
                     logging.error(
                         f"JSON decoding failed: {e.msg}. Input: {tool_call.function.arguments}"
                     )
-                    arguments = {}  # Set to default value
+                    arguments = {}
 
-                # Use the function map from tool_data
                 if function_name in tool_data["function_map"]:
                     function_to_call = tool_data["function_map"][function_name]
                     output = function_to_call(arguments)
