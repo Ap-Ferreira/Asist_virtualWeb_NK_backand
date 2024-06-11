@@ -1,14 +1,23 @@
 import logging
 from flask import Flask, request, jsonify, abort
 from flask_cors import CORS
+from core_functions import (
+    add_thread_to_sheet_with_user_agent,
+    add_thread_to_airtable,
+    client,
+    process_tool_calls,
+    get_assistant_id,
+    check_openai_version,
+    load_tools_from_directory,
+    get_folder_by_id,
+    open_spreadsheet_in_folder,
+    check_api_key,
+    SHEET_NAME,
+    get_client_ip,
+    get_geolocation
+)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-import os
-from core_functions import (
-    add_thread, client, process_tool_calls, get_assistant_id, check_openai_version, 
-    add_thread_to_sheet, load_tools_from_directory, open_spreadsheet_in_folder, 
-    list_spreadsheets_in_folder
-)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,40 +43,49 @@ limiter = Limiter(key_func=get_remote_address,
                   app=app,
                   default_limits=["200 per minute"])
 
-# Get Google Drive folder ID and spreadsheet name from environment variables
-drive_folder_id = os.getenv('DRIVE_FOLDER_ID')
-sheet_name = os.getenv('SHEET_NAME')
+# Obtener la carpeta 'bot_sheets' por ID
+folder_name = get_folder_by_id()
 
-# List spreadsheets in the specified folder
-list_spreadsheets_in_folder(drive_folder_id)
-
-# Open the specified spreadsheet in the specified folder
+# Abrir la hoja de cálculo especificada en la variable de entorno 'SHEET_NAME'
 try:
-    spreadsheet = open_spreadsheet_in_folder(drive_folder_id, sheet_name)
+    spreadsheet = open_spreadsheet_in_folder(SHEET_NAME)
     sheet = spreadsheet.sheet1
 except FileNotFoundError as e:
     logging.error(e)
-    sheet = None  # Define `sheet` as None if the spreadsheet is not found
+    sheet = None  # Definir `sheet` como None si no se encuentra la hoja de cálculo
 
 @app.route('/start', methods=['GET'])
-@limiter.limit("50 per day")  # Limit to 50 conversations per day
+@limiter.limit("50 per day")  # Limitar a 50 conversaciones por día
 def start_conversation():
+    check_api_key()
     platform = request.args.get('platform', 'Not Specified')
-    logging.info(f"Starting a new conversation from platform: {platform}")
+    user_agent = request.headers.get('User-Agent')
+    user_ip = get_client_ip()
+    # Tomar la primera dirección IP si hay múltiples
+    if ',' in user_ip:
+        user_ip = user_ip.split(',')[0].strip()
+
+    location_info = get_geolocation(user_ip)
+    logging.info(f"Starting a new conversation from platform: {platform}, User-Agent: {user_agent}, IP: {user_ip}, Location: {location_info}")
+
     thread = client.beta.threads.create()
     logging.info(f"New thread created with ID: {thread.id}")
 
     if sheet is not None:
-        add_thread_to_sheet(thread.id, platform, sheet)
+        add_thread_to_sheet_with_user_agent(thread.id, platform, user_agent, sheet, location_info, user_ip)
     else:
         logging.error("Sheet not defined. Cannot add thread to sheet.")
         return jsonify({"error": "Sheet not defined"}), 500
 
-    return jsonify({"thread_id": thread.id})
+    # Añadir el hilo a Airtable
+    add_thread_to_airtable(thread.id, platform, user_agent, location_info, user_ip)
+
+    return jsonify({"thread_id": thread.id, "user_ip": user_ip, "location_info": location_info})
 
 @app.route('/chat', methods=['POST'])
-@limiter.limit("100 per day")  # Limit to 100 messages per day
+@limiter.limit("100 per day")  # Limitar a 100 mensajes por día
 def chat():
+    check_api_key()
     data = request.json
     thread_id = data.get('thread_id')
     user_input = data.get('message', '')
@@ -77,8 +95,11 @@ def chat():
         return jsonify({"error": "Missing thread_id"}), 400
 
     logging.info(f"Received message: {user_input} for thread ID: {thread_id}")
-    client.beta.threads.messages.create(thread_id=thread_id, role="user", content=user_input)
-    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=assistant_id)
+    client.beta.threads.messages.create(thread_id=thread_id,
+                                        role="user",
+                                        content=user_input)
+    run = client.beta.threads.runs.create(thread_id=thread_id,
+                                          assistant_id=assistant_id)
 
     logging.info(f"Run ID: {run.id}")
     result = process_tool_calls(client, thread_id, run.id, tool_data)
@@ -97,7 +118,8 @@ def handle_401_error(e):
 @app.errorhandler(500)
 def handle_500_error(e):
     logging.error(f"Internal Server Error: {e}")
-    return jsonify(error="Internal Server Error", message="An unexpected error occurred"), 500
+    return jsonify(error="Internal Server Error",
+                   message="An unexpected error occurred"), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
